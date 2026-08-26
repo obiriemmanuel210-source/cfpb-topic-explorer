@@ -3,7 +3,7 @@
 **MSc Business Analytics — Text Analytics Group Project (Group 8)**
 Customer Complaint Topic Modelling using NMF and LDA on CFPB consumer complaint narratives.
 
-**Live app:** [Add your share.streamlit.io URL here once deployed]
+**Live app:** [cfpb-topic-explorer-ciu2kdu93qfncecbsfk9ue.streamlit.app](https://cfpb-topic-explorer-ciu2kdu93qfncecbsfk9ue.streamlit.app/)
 
 ![App screenshot](app_screenshot.png)
 
