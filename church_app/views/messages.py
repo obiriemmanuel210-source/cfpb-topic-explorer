@@ -7,6 +7,7 @@ import streamlit as st
 
 import auth
 import db
+import sms
 import ui
 
 TEMPLATES = {
@@ -59,8 +60,8 @@ def render():
     eng = ui.engine()
     role = ui.user()["role"]
     st.title("✉️ Messages")
-    st.caption("Prepare personalised messages, then send them by WhatsApp (one tap each) or upload the CSV "
-               "to your bulk-SMS provider. This app does not send SMS by itself yet.")
+    st.caption("Prepare personalised messages, then send them by SMS through mNotify, "
+               "by WhatsApp (one tap each), or download a CSV.")
 
     kinds = [k for k in TEMPLATES if k != "Pledge reminders" or auth.sees_giving(role)]
     kind = st.selectbox("Who is this for?", kinds)
@@ -79,9 +80,8 @@ def render():
     message = st.text_area("Message", TEMPLATES[kind], key=f"msg_{kind}", height=110,
                            help="These words are replaced for each person: " + ", ".join(fields))
     unicode_text = any(ord(ch) > 127 for ch in message)
-    per_sms = 70 if unicode_text else 160
-    st.caption(f"{len(message)} characters ≈ {max(1, -(-len(message) // per_sms))} SMS each"
-               + (" (contains special characters, so each SMS holds only 70)" if unicode_text else ""))
+    st.caption(f"{len(message)} characters ≈ {sms.parts(message)} SMS each (before names are filled in)"
+               + (" — contains special characters, so each SMS holds only 70" if unicode_text else ""))
 
     if people.empty:
         st.info("Nobody matches this list right now.")
@@ -112,3 +112,49 @@ def render():
     if len(missing):
         with st.expander("People with no phone number"):
             st.dataframe(missing[["name"]], hide_index=True)
+
+    _send_section(kind, out, country)
+
+
+def _send_section(kind, out, country):
+    st.subheader("Send by SMS (mNotify)")
+    api_key, sender = ui.setting("mnotify_api_key"), ui.setting("sms_sender_id")
+    if not api_key or not sender:
+        st.info("To send from here, add `mnotify_api_key` and `sms_sender_id` to the app's secrets. "
+                "The sender ID (max 11 characters, e.g. GRACECHAPEL) must first be approved in your mNotify dashboard.")
+        return
+    if out.empty:
+        return
+
+    credits = int(sum(sms.parts(m) for m in out["message"]))
+    c1, c2 = st.columns(2)
+    c1.metric("Recipients", len(out))
+    c2.metric("Estimated credits", credits, help="Each long message uses more than one credit.")
+    if st.button("Check my SMS balance"):
+        try:
+            bal, bonus = sms.balance(api_key)
+            st.info(f"Balance: {bal} credits" + (f" (+{bonus} bonus)" if bonus else ""))
+        except Exception as err:  # network or provider problem: show it, keep the page working
+            st.error(f"Couldn't check the balance: {err}")
+
+    batch_id = hash((sender, tuple(out["phone"]), tuple(out["message"])))
+    already = batch_id in st.session_state.setdefault("sms_sent", set())
+    if already:
+        st.warning("You already sent exactly these messages in this session.")
+    sure = st.checkbox(f"Yes, send {len(out)} SMS from '{sender}' now" + (" again" if already else ""), key=f"sms_ok_{batch_id}")
+    if st.button("Send SMS", type="primary", disabled=not sure):
+        bar = st.progress(0.0, text="Sending…")
+        result = sms.send_personalised(api_key, sender, out[["phone", "message"]].to_dict("records"), country,
+                                       on_progress=lambda f: bar.progress(f, text="Sending…"))
+        bar.empty()
+        st.session_state.sms_sent.add(batch_id)
+        ui.audit("sms.send", f"{kind}: sent {result['sent']}, rejected {result['rejected']}, credits {result['credit_used']:g}"
+                 + (f", ERROR: {result['error']}" if result["error"] else ""))
+        if result["sent"]:
+            st.success(f"Sent {result['sent']} SMS · used {result['credit_used']:g} credits"
+                       + (f" · {result['credit_left']} credits left" if result["credit_left"] is not None else ""))
+        if result["rejected"]:
+            st.warning(f"mNotify rejected {result['rejected']} numbers (usually wrong or incomplete numbers).")
+        if result["error"]:
+            st.error(f"Stopped: {result['error']}. {result['failed']} messages in the failed request may not have gone, "
+                     f"and {result['not_attempted']} were not attempted. Check your mNotify dashboard before resending.")
